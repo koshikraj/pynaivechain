@@ -14,7 +14,10 @@ QUERY_LATEST = 0
 QUERY_ALL = 1
 RESPONSE_BLOCKCHAIN = 2
 
-port = 3001
+try:
+    port = int(os.environ['PORT'])
+except Exception as e:
+    port = 3001
 
 try:
     initialPeers = os.environ['PEERS'].split(",")
