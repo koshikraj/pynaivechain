@@ -1,13 +1,12 @@
-from Crypto.Hash import SHA256
+import json as JSON
+import os
+import websockets
 
+from Crypto.Hash import SHA256
 from datetime import datetime
 from sanic import Sanic
 from sanic.response import json
 from websockets.exceptions import ConnectionClosed
-import websockets
-
-
-import json as JSON
 
 sockets = []
 
@@ -15,9 +14,12 @@ QUERY_LATEST = 0
 QUERY_ALL = 1
 RESPONSE_BLOCKCHAIN = 2
 
-http_port = 3005
-p2p_port = 6001
-initialPeers = ["ws://localhost:3007"]
+port = 3001
+
+try:
+    initialPeers = os.environ['PEERS'].split(",")
+except Exception as e:
+    initialPeers = []
 
 class Block(object):
 
@@ -41,13 +43,17 @@ blockchain = [getGenesisBlock()]
 app = Sanic()
 
 
-@app.route('/blocks')
+@app.route('/blocks', methods=['GET'])
 async def blocks(request):
     return json(blockchain)
 
-@app.route('/mineBlock')
+@app.route('/mineBlock', methods=['POST'])
 async def mine_block(request):
-    newBlock = generateNextBlock("datatsdas")
+
+    try:
+        newBlock = generateNextBlock(request.json["data"])
+    except KeyError as e:
+        return json({"status": False, "message": "pass value in data key"})
     addBlock(newBlock)
     await broadcast(responseLatestMsg())
     return json(newBlock)
@@ -57,22 +63,22 @@ async def connectToPeers(newPeers):
         print(peer)
         try:
             ws = await websockets.connect(peer)
-            sockets.append(ws);
+
             await initConnection(ws)
         except Exception as e:
-            print ("connect to p" + str(e))
+            print(str(e))
 
 # initP2PServer WebSocket server
 @app.websocket('/')
 async def feed(request, ws):
-    print('listening websocket p2p port on: %d' % http_port);
+    print('listening websocket p2p port on: %d' % port);
 
-    while True:
-        try:
-            await initConnection(ws)
-        except (ConnectionClosed):
-            await closeConnection(ws)
-            break
+
+    try:
+        await initConnection(ws)
+    except (ConnectionClosed):
+        await closeConnection(ws)
+
 
 async def closeConnection(ws):
     print("connection failed to peer")
@@ -80,8 +86,14 @@ async def closeConnection(ws):
 
 async def initConnection(ws):
 
-    await initMessageHandler(ws)
-    # write(ws, queryChainLengthMsg())
+    print("inside initConnection")
+
+    sockets.append(ws)
+    await ws.send(JSON.dumps(queryChainLengthMsg()))
+
+    while True:
+        await initMessageHandler(ws)
+
 
 async def initMessageHandler(ws):
     data = await ws.recv()
@@ -186,31 +198,41 @@ async def handleBlockchainResponse(ws, message):
             await broadcast(queryAllMsg())
         else:
             print("Received blockchain is longer than current blockchain")
-            replaceChain(receivedBlocks)
+            await replaceChain(receivedBlocks)
     else:
         print('received blockchain is not longer than current blockchain. Do nothing')
 
 async def replaceChain(newBlocks):
 
-    if isValidChain(newBlocks) and len(newBlocks) > len(blockchain):
-        print('Received blockchain is valid. Replacing current blockchain with '
-              'received blockchain')
-        blockchain = newBlocks
-        await broadcast(responseLatestMsg())
-    else:
-        print('Received blockchain invalid')
+    global blockchain
+    try:
+
+        if isValidChain(newBlocks) and len(newBlocks) > len(blockchain):
+            print('Received blockchain is valid. Replacing current blockchain with '
+                  'received blockchain')
+            blockchain = [Block(**block) for block in newBlocks]
+            await broadcast(responseLatestMsg())
+        else:
+            print('Received blockchain invalid')
+    except Exception as e:
+        print ("error in replace" + str(e))
 
 def isValidChain(blockchainToValidate):
 
-    if JSON.dumps(blockchainToValidate[0]) != JSON.dumps(getGenesisBlock()):
+    if calculateHashForBlock(Block(**blockchainToValidate[0])) != getGenesisBlock().hash:
         return False
-    tempBlocks = [blockchainToValidate[0]]
+
+    tempBlocks = [Block(**blockchainToValidate[0])]
     for currentBlock in blockchainToValidate[1:]:
-        if(isValidNewBlock(currentBlock, tempBlocks[-1])):
-            tempBlocks.append(currentBlock)
+        if(isValidNewBlock(Block(**currentBlock), tempBlocks[-1])):
+            tempBlocks.append(Block(**currentBlock))
         else:
             return False
     return True
+
+def queryChainLengthMsg():
+
+    return {'type': QUERY_LATEST}
 
 def queryAllMsg():
 
@@ -219,10 +241,10 @@ def queryAllMsg():
 async def broadcast(message):
 
     for socket in sockets:
+        print (socket)
         await socket.send(JSON.dumps(message))
 
 if __name__ == '__main__':
 
     app.add_task(connectToPeers(initialPeers))
-    app.run(host='0.0.0.0', port=http_port, debug=True)
-
+    app.run(host='0.0.0.0', port=port, debug=True)
