@@ -3,9 +3,10 @@ MAINTAINER Channel Cat <channelcat@gmail.com>
 
 ADD . /code
 RUN pip3 install git+https://github.com/channelcat/sanic
+RUN pip3 install pycryptodome
 
-EXPOSE 8000
+EXPOSE 3001
 
 WORKDIR /code
 
-CMD ["python", "simple_server.py"]
+CMD ["python", "main.py"]
