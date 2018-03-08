@@ -1,6 +1,8 @@
 # pynaivechain
 Python implementation of [naivechain](https://github.com/lhartikk/naivechain) project
 
+[![Build Status](https://travis-ci.org/koshikraj/pynaivechain.svg?branch=master)](https://travis-ci.org/koshikraj/pynaivechain)
+
 # Naivechain - a blockchain implementation in 200 lines of code
 
 ### Motivation
