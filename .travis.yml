@@ -16,7 +16,6 @@ before_install:
 
   - docker-compose pull
   - docker-compose build
-  - docker-compose up
 
   - docker ps
 
