@@ -61,6 +61,19 @@ async def mine_block(request):
     await broadcast(responseLatestMsg())
     return json(newBlock)
 
+@app.route('/peers', methods=['GET'])
+async def blocks(request):
+    peers = map(lambda x: "{}:{}".format(x.remote_address[0], x.remote_address[1])
+                , sockets)
+    return json(peers)
+
+@app.route('/addPeer', methods=['POST'])
+async def blocks(request):
+    import asyncio
+    asyncio.ensure_future(connectToPeers([request.json["peer"]]),
+                                         loop=asyncio.get_event_loop())
+    return json({"status": True})
+
 async def connectToPeers(newPeers):
     for peer in newPeers:
         print(peer)
@@ -92,6 +105,7 @@ async def initConnection(ws):
     print("inside initConnection")
 
     sockets.append(ws)
+    print(dir(ws))
     await ws.send(JSON.dumps(queryChainLengthMsg()))
 
     while True:
