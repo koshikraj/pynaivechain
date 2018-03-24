@@ -2,13 +2,13 @@ import json as JSON
 import os
 import websockets
 
-from Crypto.Hash import SHA256
-from datetime import datetime
 from sanic import Sanic
 from sanic.response import json
 from websockets.exceptions import ConnectionClosed
 
-sockets = []
+from blockchain import Block, Blockchain
+from utils.logger import logger
+
 
 QUERY_LATEST = 0
 QUERY_ALL = 1
@@ -17,251 +17,171 @@ RESPONSE_BLOCKCHAIN = 2
 try:
     port = int(os.environ['PORT'])
 except Exception as e:
-    port = 3001
+    port = 3004
 
 try:
     initialPeers = os.environ['PEERS'].split(",")
 except Exception as e:
     initialPeers = []
 
-class Block(object):
 
-    def __init__(self, index, previousHash, timestamp, data, hash):
-        self.index = index
-        self.previousHash = previousHash
-        self.timestamp = timestamp
-        self.data = data
-        self.hash = hash
+class Server(object):
 
-def getGenesisBlock():
+    def __init__(self):
 
-    # SHA256.new(data=(str(0) + "0"+ str(1465154705) +"my genesis block!!").encode()).hexdigest()
+        self.app = Sanic()
+        self.blockchain = Blockchain()
+        self.sockets = []
+        self.app.add_route(self.blocks, '/blocks', methods=['GET'])
+        self.app.add_route(self.mine_block, '/mineBlock', methods=['POST'])
+        self.app.add_route(self.peers, '/peers', methods=['GET'])
+        self.app.add_route(self.add_peer, '/addPeer', methods=['POST'])
+        self.app.add_websocket_route(self.p2p_handler, '/')
 
-    return Block(0, "0", 1465154705, "my genesis block!!", "816534932c2b7154836da6afc367695e6337db8a921823784c14378abed4f7d7")
+    async def blocks(self, request):
+        return json(self.blockchain.blocks)
 
+    async def mine_block(self, request):
 
-blockchain = [getGenesisBlock()]
-
-
-app = Sanic()
-
-
-@app.route('/blocks', methods=['GET'])
-async def blocks(request):
-    return json(blockchain)
-
-@app.route('/mineBlock', methods=['POST'])
-async def mine_block(request):
-
-    try:
-        newBlock = generateNextBlock(request.json["data"])
-    except KeyError as e:
-        return json({"status": False, "message": "pass value in data key"})
-    addBlock(newBlock)
-    await broadcast(responseLatestMsg())
-    return json(newBlock)
-
-@app.route('/peers', methods=['GET'])
-async def blocks(request):
-    peers = map(lambda x: "{}:{}".format(x.remote_address[0], x.remote_address[1])
-                , sockets)
-    return json(peers)
-
-@app.route('/addPeer', methods=['POST'])
-async def blocks(request):
-    import asyncio
-    asyncio.ensure_future(connectToPeers([request.json["peer"]]),
-                                         loop=asyncio.get_event_loop())
-    return json({"status": True})
-
-async def connectToPeers(newPeers):
-    for peer in newPeers:
-        print(peer)
         try:
-            ws = await websockets.connect(peer)
+            newBlock = self.blockchain.generate_next_block(request.json["data"])
+        except KeyError as e:
+            return json({"status": False, "message": "pass value in data key"})
+        self.blockchain.add_block(newBlock)
+        await self.broadcast(self.response_latest_msg())
+        return json(newBlock)
 
-            await initConnection(ws)
+    async def peers(self, request):
+        peers = map(lambda x: "{}:{}".format(x.remote_address[0], x.remote_address[1])
+                    , self.sockets)
+        return json(peers)
+
+    async def add_peer(self, request):
+        import asyncio
+        asyncio.ensure_future(self.connect_to_peers([request.json["peer"]]),
+                                             loop=asyncio.get_event_loop())
+        return json({"status": True})
+
+    async def connect_to_peers(self, newPeers):
+        for peer in newPeers:
+            logger.info(peer)
+            try:
+                ws = await websockets.connect(peer)
+
+                await self.init_connection(ws)
+            except Exception as e:
+                logger.info(str(e))
+
+    # initP2PServer WebSocket server
+    async def p2p_handler(self, request, ws):
+        logger.info('listening websocket p2p port on: %d' % port)
+
+
+        try:
+            await self.init_connection(ws)
+        except (ConnectionClosed):
+            await self.connection_closed(ws)
+
+    async def connection_closed(self, ws):
+
+        logger.critical("connection failed to peer")
+        self.sockets.remove(ws)
+
+    async def init_connection(self, ws):
+
+        self.sockets.append(ws)
+        await ws.send(JSON.dumps(self.query_chain_length_msg()))
+
+        while True:
+            await self.init_message_handler(ws)
+
+    async def init_message_handler(self, ws):
+        data = await ws.recv()
+        message = JSON.loads(data)
+        logger.info('Received message', data)
+
+        await {
+            QUERY_LATEST: self.send_latest_msg,
+            QUERY_ALL: self.send_chain_msg,
+            RESPONSE_BLOCKCHAIN: self.handle_blockchain_response
+        }[message["type"]](ws, message)
+
+    async def send_latest_msg(self, ws, *args):
+        await ws.send(JSON.dumps(self.response_latest_msg()))
+
+    async def send_chain_msg(self, ws, *args):
+
+        await ws.send(JSON.dumps(self.response_chain_msg()))
+
+    def response_chain_msg(self):
+        return {
+            'type': RESPONSE_BLOCKCHAIN,
+            'data': JSON.dumps([block.dict() for block in self.blockchain.blocks])
+        }
+
+    def response_latest_msg(self):
+
+        return {
+            'type': RESPONSE_BLOCKCHAIN,
+            'data': JSON.dumps([self.blockchain.get_latest_block().dict()])
+        }
+
+    async def handle_blockchain_response(self, ws, message):
+
+        received_blocks = sorted(JSON.loads(message["data"]), key=lambda k: k['index'])
+        logger.info(received_blocks)
+        latest_block_received = received_blocks[-1]
+        latest_block_held = self.blockchain.get_latest_block()
+        if latest_block_received["index"] > latest_block_held.index:
+            logger.info('blockchain possibly behind. We got: ' + str(latest_block_held.index)
+                  + ' Peer got: ' + str(latest_block_received["index"]))
+            if latest_block_held.hash == latest_block_received["previous_hash"]:
+                logger.info("We can append the received block to our chain")
+
+                self.blockchain.blocks.append(Block(**latest_block_received))
+                await self.broadcast(self.response_latest_msg())
+            elif len(received_blocks) == 1:
+                logger.info("We have to query the chain from our peer")
+                await self.broadcast(self.query_all_msg())
+            else:
+                logger.info("Received blockchain is longer than current blockchain")
+                await self.replace_chain(received_blocks)
+        else:
+            logger.info('received blockchain is not longer than current blockchain. Do nothing')
+
+    async def replace_chain(self, newBlocks):
+
+        try:
+
+            if self.blockchain.is_valid_chain(newBlocks) and len(newBlocks) > len(self.blockchain.blocks):
+                logger.info('Received blockchain is valid. Replacing current blockchain with '
+                            'received blockchain')
+                self.blockchain.blocks = [Block(**block) for block in newBlocks]
+                await self.broadcast(self.response_latest_msg())
+            else:
+                logger.info('Received blockchain invalid')
         except Exception as e:
-            print(str(e))
-
-# initP2PServer WebSocket server
-@app.websocket('/')
-async def feed(request, ws):
-    print('listening websocket p2p port on: %d' % port);
-
-
-    try:
-        await initConnection(ws)
-    except (ConnectionClosed):
-        await closeConnection(ws)
-
-
-async def closeConnection(ws):
-    print("connection failed to peer")
-    sockets.remove(ws)
-
-async def initConnection(ws):
-
-    print("inside initConnection")
-
-    sockets.append(ws)
-    print(dir(ws))
-    await ws.send(JSON.dumps(queryChainLengthMsg()))
-
-    while True:
-        await initMessageHandler(ws)
-
-
-async def initMessageHandler(ws):
-    data = await ws.recv()
-    message = JSON.loads(data)
-    print('Received message', data)
-
-    await {
-        QUERY_LATEST: sendLatestMsg,
-        QUERY_ALL: sendChainMsg,
-        RESPONSE_BLOCKCHAIN: handleBlockchainResponse
-    }[message["type"]](ws, message)
-
-async def sendLatestMsg(ws, *args):
-    await ws.send(JSON.dumps(responseLatestMsg()))
-
-async def sendChainMsg(ws, *args):
-
-    await ws.send(JSON.dumps(responseChainMsg()))
+            logger.info("Error in replace chain" + str(e))
 
 
 
-def generateNextBlock(blockData):
-    previousBlock = getLatestBlock()
-    nextIndex = previousBlock.index + 1
-    nextTimestamp = datetime.now().strftime("%s")
-    nextHash = calculateHash(nextIndex, previousBlock.hash, nextTimestamp, blockData)
-    return Block(nextIndex, previousBlock.hash, nextTimestamp, blockData, nextHash)
+    def query_chain_length_msg(self):
 
-def getLatestBlock():
-    try:
-        return blockchain[-1]
-    except IndexError as e:
-        return None
+        return {'type': QUERY_LATEST}
 
-def responseChainMsg():
+    def query_all_msg(self):
 
-    return {
-    'type': RESPONSE_BLOCKCHAIN,
-    'data': JSON.dumps([formatBlock(block) for block in blockchain])
-    }
+        return {'type': QUERY_ALL}
 
-def responseLatestMsg():
+    async def broadcast(self, message):
 
-    return {
-    'type': RESPONSE_BLOCKCHAIN,
-    'data': JSON.dumps([formatBlock(getLatestBlock())])
-    }
+        for socket in self.sockets:
+            logger.info (socket)
+            await socket.send(JSON.dumps(message))
 
-# Unable to serialize the block object without formatting it
-def formatBlock(block):
-
-    return {"data": block.data,
-            "hash": block.hash,
-            "index": block.index,
-            "previousHash": block.previousHash,
-            "timestamp": block.timestamp}
-
-def calculateHashForBlock(block):
-
-    return calculateHash(block.index, block.previousHash, block.timestamp, block.data)
-
-def calculateHash(index, previousHash, timestamp, data):
-
-    hash_object = SHA256.new(data=(str(index) + previousHash + str(timestamp) + data).encode())
-    return hash_object.hexdigest()
-
-def addBlock(newBlock):
-
-    if (isValidNewBlock(newBlock, getLatestBlock())):
-        blockchain.append(newBlock)
-
-def isValidNewBlock(newBlock, previousBlock):
-
-    if (previousBlock.index + 1 != newBlock.index):
-        print('invalid index')
-        return False
-    elif (previousBlock.hash != newBlock.previousHash):
-        print('invalid previoushash');
-        return False
-    elif (calculateHashForBlock(newBlock) != newBlock.hash):
-      print( type(newBlock.hash) + ' ' + type(calculateHashForBlock(newBlock)))
-      print('invalid hash: ' + calculateHashForBlock(newBlock) + ' ' + newBlock.hash)
-      return False
-
-    return True
-
-async def handleBlockchainResponse(ws, message):
-
-    receivedBlocks = sorted(JSON.loads(message["data"]), key=lambda k: k['index'])
-    print (receivedBlocks)
-    latestBlockReceived = receivedBlocks[-1];
-    latestBlockHeld = getLatestBlock();
-    if (latestBlockReceived["index"] > latestBlockHeld.index):
-        print('blockchain possibly behind. We got: ' + str(latestBlockHeld.index) + ' Peer got: ' + str(latestBlockReceived["index"]))
-        if (latestBlockHeld.hash == latestBlockReceived["previousHash"]):
-            print("We can append the received block to our chain")
-
-            blockchain.append(Block(**latestBlockReceived))
-            await broadcast(responseLatestMsg())
-        elif (len(receivedBlocks) == 1):
-            print("We have to query the chain from our peer")
-            await broadcast(queryAllMsg())
-        else:
-            print("Received blockchain is longer than current blockchain")
-            await replaceChain(receivedBlocks)
-    else:
-        print('received blockchain is not longer than current blockchain. Do nothing')
-
-async def replaceChain(newBlocks):
-
-    global blockchain
-    try:
-
-        if isValidChain(newBlocks) and len(newBlocks) > len(blockchain):
-            print('Received blockchain is valid. Replacing current blockchain with '
-                  'received blockchain')
-            blockchain = [Block(**block) for block in newBlocks]
-            await broadcast(responseLatestMsg())
-        else:
-            print('Received blockchain invalid')
-    except Exception as e:
-        print ("error in replace" + str(e))
-
-def isValidChain(blockchainToValidate):
-
-    if calculateHashForBlock(Block(**blockchainToValidate[0])) != getGenesisBlock().hash:
-        return False
-
-    tempBlocks = [Block(**blockchainToValidate[0])]
-    for currentBlock in blockchainToValidate[1:]:
-        if(isValidNewBlock(Block(**currentBlock), tempBlocks[-1])):
-            tempBlocks.append(Block(**currentBlock))
-        else:
-            return False
-    return True
-
-def queryChainLengthMsg():
-
-    return {'type': QUERY_LATEST}
-
-def queryAllMsg():
-
-    return {'type': QUERY_ALL}
-
-async def broadcast(message):
-
-    for socket in sockets:
-        print (socket)
-        await socket.send(JSON.dumps(message))
 
 if __name__ == '__main__':
 
-    app.add_task(connectToPeers(initialPeers))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    server = Server()
+    server.app.add_task(server.connect_to_peers(initialPeers))
+    server.app.run(host='0.0.0.0', port=port, debug=True)
