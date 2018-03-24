@@ -16,8 +16,8 @@ RESPONSE_BLOCKCHAIN = 2
 
 try:
     port = int(os.environ['PORT'])
-except Exception as e:
-    port = 3004
+except KeyError as e:
+    port = 3001
 
 try:
     initialPeers = os.environ['PEERS'].split(",")
