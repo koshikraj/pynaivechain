@@ -98,7 +98,7 @@ class Server(object):
     async def init_message_handler(self, ws):
         data = await ws.recv()
         message = JSON.loads(data)
-        logger.info('Received message', data)
+        logger.info('Received message: {}'.format(data))
 
         await {
             QUERY_LATEST: self.send_latest_msg,
@@ -176,7 +176,7 @@ class Server(object):
     async def broadcast(self, message):
 
         for socket in self.sockets:
-            logger.info (socket)
+            logger.info(socket)
             await socket.send(JSON.dumps(message))
 
 

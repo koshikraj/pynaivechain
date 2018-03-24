@@ -1,6 +1,7 @@
 from Crypto.Hash import SHA256
 from datetime import datetime
 
+from utils.logger import logger
 
 class Block(object):
 
@@ -75,14 +76,14 @@ class Blockchain(object):
     def is_valid_new_block(self, new_block, previous_block):
 
         if previous_block.index + 1 != new_block.index:
-            print('invalid index')
+            logger.warning('invalid index')
             return False
         elif previous_block.hash != new_block.previous_hash:
-            print('invalid previous hash')
+            logger.warning('invalid previous hash')
             return False
         elif self.calculate_hash_for_block(new_block) != new_block.hash:
-            print(type(new_block.hash) + ' ' + type(self.calculate_hash_for_block(new_block)))
-            print('invalid hash: ' + self.calculate_hash_for_block(new_block) + ' ' + new_block.hash)
+            logger.info(type(new_block.hash) + ' ' + type(self.calculate_hash_for_block(new_block)))
+            logger.warning('invalid hash: ' + self.calculate_hash_for_block(new_block) + ' ' + new_block.hash)
             return False
 
         return True
